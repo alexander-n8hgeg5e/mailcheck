@@ -1,0 +1,114 @@
+#!/sbin/openrc-run
+command="mailchecker"
+name="mailchecker"
+
+description="checks for new mail and writes result to file"
+
+depend(){
+need offlineimap
+}
+
+
+status() {
+    f=0
+    for i in $( cat /etc/nodelist ); do
+        test -f "/var/run/${i}/${name}.pid" && f=$((${f} + 1))
+    done
+	if service_stopping; then
+		ewarn "status: stopping"
+		return 4
+	elif service_starting; then
+		ewarn "status: starting"
+		return 8
+	elif service_inactive && test $f = 0 ; then
+		ewarn "status: inactive"
+		return 16
+	elif service_crashed; then
+		eerror "status: crashed"
+		return 32
+	elif test $f -gt 0 ; then
+		einfo "status: started $f nodes"
+        mark_service_started $name
+		return 0
+	elif test $f = 0 ; then
+		einfo "status: stopped"
+        mark_service_stopped $name
+		return 3
+	else
+		einfo "status: stopped"
+        mark_service_stopped $name
+		return 3
+	fi
+}
+
+stop() {
+    ebegin "${name} stopping"
+    for i in $(cat /etc/nodelist); do \
+        pidfile="/var/run/${i}/${name}.pid"
+        test -f ${pidfile} \
+        &&  if test ${i} = $(hostname); then
+		    	node_stop
+            else
+                einfo "calling node $i to stop ${name} ..."
+                sudo -u "$(getent passwd 1000 | cut -d: -f1)" $i sudo rc-service ${name} stop
+            fi
+    done
+    eend $(status 1>&2 2> /dev/null)
+}
+
+start_pre(){
+     status offlineimap
+	 true
+}
+
+start() {
+    ebegin "${name} starting"
+	status
+	test $? -eq 3 || eend 0
+    mkdir -p /var/run/$(hostname)
+    pidfile="/var/run/$(hostname)/${name}.pid"
+	node_start
+    f=0
+    for i in $( cat /etc/nodelist ); do
+        test -f "/var/run/${i}/${name}.pid" && f=$((${f} + 1))
+    done
+	if [[ $f -gt 1 ]] ;then
+		ewarn $name multi node
+        node_stop
+		sleep $(fish -c "math (random choice 1 4 8 ) \* ( random choice 3 5 7 )")
+	fi
+    f=0
+    for i in $( cat /etc/nodelist ); do
+        test -f "/var/run/${i}/${name}.pid" && f=$((${f} + 1))
+    done
+	if [[ $f -gt 1 ]] ;then
+		node_stop
+	fi
+    f=0
+    for i in $( cat /etc/nodelist ); do
+        test -f "/var/run/${i}/${name}.pid" && f=$((${f} + 1))
+    done
+	if [[ $f -eq 0 ]]; then
+		start_node
+	fi
+	eend $?
+}
+
+node_start() {
+    ebegin "local ${name} starting"
+    start-stop-daemon \
+     -u "$(getent passwd 1000 | cut -d: -f1)" \
+     --start --exec  ${command} \
+     --nicelevel 19 \
+     --ionice 3 \
+     --pidfile ${pidfile} --make-pidfile \
+     --background --interpreted \
+     --wait 10000  | logger -p mail.info 2>&1  | logger -p mail.error
+}
+
+node_stop() {
+    ebegin "local ${name} stopping"
+    start-stop-daemon --stop --exec  ${command} \
+            --pidfile ${pidfile} \
+            --retry SIGHUP/10 SIGQUIT/10 SIGTERM/10 SIGKILL/10 | logger -p mail.info 2>&1  | logger -p mail.error
+}
